@@ -14,6 +14,9 @@
    模块 C：Token Counter 分词高亮渲染优化（桌面/移动通用）
            透明拦截 appendChild/insertBefore + content-visibility 分组，
            解决大文本分词高亮渲染导致的页面假死；首屏上限 + 「继续加载」逐帧渐进渲染。
+   模块 D：外部小窗键盘保护（仅移动端）
+           当微信等外部悬浮窗唤起输入法并压缩酒馆视口时，临时隐藏酒馆输入栏；
+           酒馆重新获得焦点或外部键盘收起后立即恢复。
    ============================================================ */
 
 function isMobile() {
@@ -149,6 +152,150 @@ function initMobileFocusInterceptor() {
     window.__mobileFocusInterceptorDestroy__ = destroy;
 
     console.log('[MobileFocus] 聚焦拦截器就绪');
+}
+
+// ============================================================
+// 模块 D: 外部小窗键盘保护（仅移动端）
+// ============================================================
+
+function initExternalKeyboardViewportGuard() {
+    if (window.__mfiExternalKeyboardGuardInstalled__) {
+        return;
+    }
+    window.__mfiExternalKeyboardGuardInstalled__ = true;
+
+    if (!isMobile()) {
+        return;
+    }
+
+    var KEYBOARD_GAP_THRESHOLD = 120;
+    var root = document.documentElement;
+    var viewport = window.visualViewport;
+    var pageHasFocus = document.hasFocus();
+    var stableViewportHeight = 0;
+    var stableViewportWidth = 0;
+    var settleTimer = null;
+
+    var styleEl = document.createElement('style');
+    styleEl.id = 'mfi-external-keyboard-style';
+    styleEl.textContent = '' +
+        'html.mfi-external-keyboard-open #form_sheld,' +
+        'html.mfi-external-keyboard-open #send_form {' +
+        '  visibility: hidden !important;' +
+        '  pointer-events: none !important;' +
+        '}';
+    (document.head || document.documentElement).appendChild(styleEl);
+
+    function readViewportSize() {
+        return {
+            height: Math.max(0, Number(viewport && viewport.height) || window.innerHeight || 0),
+            width: Math.max(0, Number(viewport && viewport.width) || window.innerWidth || 0),
+        };
+    }
+
+    function setGuardActive(active) {
+        root.classList.toggle('mfi-external-keyboard-open', !!active);
+    }
+
+    function syncViewportState() {
+        // Some Android WebViews update document focus without dispatching window.blur.
+        if (pageHasFocus && typeof document.hasFocus === 'function' && !document.hasFocus()) {
+            pageHasFocus = false;
+        }
+
+        var size = readViewportSize();
+        if (!size.height || !size.width) {
+            setGuardActive(false);
+            return;
+        }
+
+        var orientationChanged = stableViewportWidth > 0 && Math.abs(size.width - stableViewportWidth) > 80;
+        if (!stableViewportHeight || orientationChanged) {
+            stableViewportHeight = size.height;
+            stableViewportWidth = size.width;
+        }
+
+        var keyboardGap = stableViewportHeight - size.height;
+        var pageVisible = document.visibilityState !== 'hidden';
+        var externalKeyboardOpen = pageVisible && !pageHasFocus && keyboardGap > KEYBOARD_GAP_THRESHOLD;
+        setGuardActive(externalKeyboardOpen);
+
+        // Only learn a new full-height baseline after the viewport has recovered.
+        if (!externalKeyboardOpen && keyboardGap < 40) {
+            stableViewportHeight = Math.max(stableViewportHeight, size.height);
+            stableViewportWidth = size.width;
+        }
+    }
+
+    function scheduleSettleCheck() {
+        clearTimeout(settleTimer);
+        settleTimer = setTimeout(syncViewportState, 160);
+    }
+
+    function onWindowBlur() {
+        pageHasFocus = false;
+        syncViewportState();
+        scheduleSettleCheck();
+    }
+
+    function onWindowFocus() {
+        pageHasFocus = true;
+        setGuardActive(false);
+        syncViewportState();
+        scheduleSettleCheck();
+    }
+
+    function onTrustedPageInteraction(event) {
+        if (event.isTrusted === false) return;
+        pageHasFocus = true;
+        setGuardActive(false);
+    }
+
+    function onVisibilityChange() {
+        if (document.visibilityState === 'hidden') {
+            pageHasFocus = false;
+            setGuardActive(false);
+            return;
+        }
+        pageHasFocus = document.hasFocus();
+        syncViewportState();
+        scheduleSettleCheck();
+    }
+
+    var initialSize = readViewportSize();
+    stableViewportHeight = initialSize.height;
+    stableViewportWidth = initialSize.width;
+
+    window.addEventListener('blur', onWindowBlur);
+    window.addEventListener('focus', onWindowFocus);
+    window.addEventListener('resize', syncViewportState, { passive: true });
+    viewport && viewport.addEventListener('resize', syncViewportState, { passive: true });
+    viewport && viewport.addEventListener('scroll', syncViewportState, { passive: true });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    document.addEventListener('pointerdown', onTrustedPageInteraction, true);
+    document.addEventListener('touchstart', onTrustedPageInteraction, { passive: true, capture: true });
+
+    function destroy() {
+        clearTimeout(settleTimer);
+        setGuardActive(false);
+        window.removeEventListener('blur', onWindowBlur);
+        window.removeEventListener('focus', onWindowFocus);
+        window.removeEventListener('resize', syncViewportState);
+        viewport && viewport.removeEventListener('resize', syncViewportState);
+        viewport && viewport.removeEventListener('scroll', syncViewportState);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        document.removeEventListener('pointerdown', onTrustedPageInteraction, true);
+        document.removeEventListener('touchstart', onTrustedPageInteraction, true);
+        if (styleEl.parentNode) {
+            styleEl.parentNode.removeChild(styleEl);
+        }
+        window.__mfiExternalKeyboardGuardInstalled__ = false;
+    }
+
+    window.addEventListener('beforeunload', destroy);
+    window.__mfiExternalKeyboardGuardDestroy__ = destroy;
+
+    console.log('[MobileFocus] 外部小窗键盘保护就绪');
 }
 
 // ============================================================
@@ -803,11 +950,13 @@ function init() {
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', function () {
             initMobileFocusInterceptor();
+            initExternalKeyboardViewportGuard();
             initPastePerformanceFix();
             initTokenCounterRenderFix();
         });
     } else {
         initMobileFocusInterceptor();
+        initExternalKeyboardViewportGuard();
         initPastePerformanceFix();
         initTokenCounterRenderFix();
     }
@@ -817,11 +966,13 @@ if (typeof window !== 'undefined' && !window.ST_EXTENSION) {
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', function () {
             initMobileFocusInterceptor();
+            initExternalKeyboardViewportGuard();
             initPastePerformanceFix();
             initTokenCounterRenderFix();
         });
     } else {
         initMobileFocusInterceptor();
+        initExternalKeyboardViewportGuard();
         initPastePerformanceFix();
         initTokenCounterRenderFix();
     }
