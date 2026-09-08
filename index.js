@@ -6,7 +6,8 @@
    针对 SillyTavern 移动端痛点优化的前端插件，双端共有的问题也会顺手一并修复。
 
    模块 A：聚焦拦截（仅移动端）
-           拦截代码自动聚焦，只在用户主动点击输入框时允许聚焦弹出键盘。
+           拦截主会话输入框的代码自动聚焦，只在用户主动点击时允许弹出键盘；
+           其他输入控件默认不受影响，并支持显式扩展拦截范围或添加白名单。
    模块 B：键盘粘贴卡顿修复（仅移动端）
            beforeinput 拦截 + visibility:hidden 抑制重绘，将分段粘贴合并为一次性渲染；
            合并窗口按文本量自适应，超大文本分段/重复粘贴不逐段整段重写。
@@ -33,32 +34,90 @@ function initMobileFocusInterceptor() {
         return;
     }
 
-    var lastTouchTime = 0;
-    var wasTouchOnInput = false;
+    var inputElements = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
+    var userFocusWindowMs = 1500;
+    var lastUserFocusTarget = null;
+    var lastUserFocusTime = 0;
 
-    function updateTouchTime(e) {
-        lastTouchTime = Date.now();
-        var el = e.target;
-        wasTouchOnInput = (
-            el.tagName === 'INPUT' ||
-            el.tagName === 'TEXTAREA' ||
-            el.tagName === 'SELECT' ||
+    function isEditableElement(el) {
+        return el instanceof HTMLElement && (
+            inputElements.has(el.tagName) ||
             el.isContentEditable
         );
     }
 
-    document.addEventListener('touchstart', updateTouchTime, { passive: true, capture: true });
-    document.addEventListener('pointerdown', updateTouchTime, { passive: true, capture: true });
-    document.addEventListener('mousedown', updateTouchTime, { capture: true });
+    /**
+     * Find the exact editable control activated by the user. composedPath() also
+     * handles controls inside web components; label.control covers label taps.
+     */
+    function getUserFocusTarget(e) {
+        var path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+        if (path.length === 0 && e.target) {
+            path = [e.target];
+        }
+
+        for (var i = 0; i < path.length; i++) {
+            var el = path[i];
+            if (!(el instanceof HTMLElement)) continue;
+            if (isEditableElement(el)) return el;
+            if (el.tagName === 'LABEL' && isEditableElement(el.control)) {
+                return el.control;
+            }
+        }
+
+        return null;
+    }
+
+    function rememberUserFocusTarget(e) {
+        // Synthetic events must not grant scripts permission to bypass the guard.
+        if (e.isTrusted === false) return null;
+        lastUserFocusTarget = getUserFocusTarget(e);
+        lastUserFocusTime = lastUserFocusTarget ? Date.now() : 0;
+        return lastUserFocusTarget;
+    }
+
+    function restoreDirectUserFocus(e) {
+        var target = rememberUserFocusTarget(e);
+        if (
+            !target ||
+            !shouldBlockAutomaticFocus(target) ||
+            isFocusExempt(target)
+        ) {
+            return;
+        }
+
+        // Run the native focus method while the trusted click gesture is still
+        // active. This recovers mobile taps whose browser default focus was lost.
+        originalFocus.call(target);
+    }
+
+    document.addEventListener('touchstart', rememberUserFocusTarget, { passive: true, capture: true });
+    document.addEventListener('pointerdown', rememberUserFocusTarget, { passive: true, capture: true });
+    document.addEventListener('mousedown', rememberUserFocusTarget, { capture: true });
+    document.addEventListener('click', restoreDirectUserFocus, { capture: true });
 
     var originalFocus = HTMLElement.prototype.focus;
-    var inputElements = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
 
-    HTMLElement.prototype.focus = function (options) {
-        var now = Date.now();
-        var isUserInitiated = (now - lastTouchTime) < 500 && wasTouchOnInput;
+    function isFocusExempt(el) {
+        return !!el.closest('#phone-panel-content, [data-mfi-allow-focus]');
+    }
 
-        if (isUserInitiated || !inputElements.has(this.tagName)) {
+    function shouldBlockAutomaticFocus(el) {
+        // The original mobile issue is SillyTavern's main composer. Additional
+        // controls can opt in without globally changing every input on the page.
+        return el.matches('#send_textarea, [data-mfi-block-auto-focus]');
+    }
+
+    function wasDirectlyActivatedByUser(el) {
+        return lastUserFocusTarget === el && Date.now() - lastUserFocusTime <= userFocusWindowMs;
+    }
+
+    var patchedFocus = function (options) {
+        if (
+            !shouldBlockAutomaticFocus(this) ||
+            isFocusExempt(this) ||
+            wasDirectlyActivatedByUser(this)
+        ) {
             return originalFocus.call(this, options);
         }
 
@@ -73,11 +132,16 @@ function initMobileFocusInterceptor() {
         return undefined;
     };
 
+    HTMLElement.prototype.focus = patchedFocus;
+
     function destroy() {
-        HTMLElement.prototype.focus = originalFocus;
-        document.removeEventListener('touchstart', updateTouchTime, { capture: true });
-        document.removeEventListener('pointerdown', updateTouchTime, { capture: true });
-        document.removeEventListener('mousedown', updateTouchTime, { capture: true });
+        if (HTMLElement.prototype.focus === patchedFocus) {
+            HTMLElement.prototype.focus = originalFocus;
+        }
+        document.removeEventListener('touchstart', rememberUserFocusTarget, { capture: true });
+        document.removeEventListener('pointerdown', rememberUserFocusTarget, { capture: true });
+        document.removeEventListener('mousedown', rememberUserFocusTarget, { capture: true });
+        document.removeEventListener('click', restoreDirectUserFocus, { capture: true });
         window.__mobileFocusInterceptorInstalled__ = false;
     }
 
