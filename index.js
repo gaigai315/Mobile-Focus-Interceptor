@@ -15,8 +15,8 @@
            透明拦截 appendChild/insertBefore + content-visibility 分组，
            解决大文本分词高亮渲染导致的页面假死；首屏上限 + 「继续加载」逐帧渐进渲染。
    模块 D：外部小窗键盘保护（仅移动端）
-           当微信等外部悬浮窗唤起输入法并压缩酒馆视口时，临时隐藏酒馆输入栏；
-           酒馆重新获得焦点或外部键盘收起后立即恢复。
+           当微信等外部悬浮窗唤起输入法并压缩酒馆视口时，锁定酒馆原始布局高度；
+           输入栏保持在原位置并落到键盘后方，返回酒馆后解除布局锁定。
    ============================================================ */
 
 function isMobile() {
@@ -179,10 +179,18 @@ function initExternalKeyboardViewportGuard() {
     var styleEl = document.createElement('style');
     styleEl.id = 'mfi-external-keyboard-style';
     styleEl.textContent = '' +
-        'html.mfi-external-keyboard-open #form_sheld,' +
-        'html.mfi-external-keyboard-open #send_form {' +
-        '  visibility: hidden !important;' +
-        '  pointer-events: none !important;' +
+        'html.mfi-external-keyboard-open,' +
+        'html.mfi-external-keyboard-open body {' +
+        '  height: var(--mfi-stable-viewport-height) !important;' +
+        '  min-height: var(--mfi-stable-viewport-height) !important;' +
+        '  overflow: hidden !important;' +
+        '}' +
+        'html.mfi-external-keyboard-open #sheld {' +
+        '  height: calc(var(--mfi-stable-viewport-height) - var(--topBarBlockSize) - 1px) !important;' +
+        '  max-height: calc(var(--mfi-stable-viewport-height) - var(--topBarBlockSize) - 1px) !important;' +
+        '}' +
+        'html.mfi-external-keyboard-open #chat {' +
+        '  max-height: calc(var(--mfi-stable-viewport-height) - var(--topBarBlockSize) - var(--bottomFormBlockSize)) !important;' +
         '}';
     (document.head || document.documentElement).appendChild(styleEl);
 
@@ -194,6 +202,13 @@ function initExternalKeyboardViewportGuard() {
     }
 
     function setGuardActive(active) {
+        var wasActive = root.classList.contains('mfi-external-keyboard-open');
+        if (active && !wasActive) {
+            var activeElement = document.activeElement;
+            if (activeElement && typeof activeElement.closest === 'function' && activeElement.closest('#form_sheld')) {
+                activeElement.blur();
+            }
+        }
         root.classList.toggle('mfi-external-keyboard-open', !!active);
     }
 
@@ -214,6 +229,7 @@ function initExternalKeyboardViewportGuard() {
             stableViewportHeight = size.height;
             stableViewportWidth = size.width;
         }
+        root.style.setProperty('--mfi-stable-viewport-height', Math.round(stableViewportHeight) + 'px');
 
         var keyboardGap = stableViewportHeight - size.height;
         var pageVisible = document.visibilityState !== 'hidden';
@@ -265,6 +281,7 @@ function initExternalKeyboardViewportGuard() {
     var initialSize = readViewportSize();
     stableViewportHeight = initialSize.height;
     stableViewportWidth = initialSize.width;
+    root.style.setProperty('--mfi-stable-viewport-height', Math.round(stableViewportHeight) + 'px');
 
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('focus', onWindowFocus);
@@ -289,6 +306,7 @@ function initExternalKeyboardViewportGuard() {
         if (styleEl.parentNode) {
             styleEl.parentNode.removeChild(styleEl);
         }
+        root.style.removeProperty('--mfi-stable-viewport-height');
         window.__mfiExternalKeyboardGuardInstalled__ = false;
     }
 
