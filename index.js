@@ -228,8 +228,10 @@ function initMobileFocusInterceptor() {
         }
     }
 
-    document.addEventListener('touchstart', rememberUserFocusTarget, { passive: true, capture: true });
-    document.addEventListener('pointerdown', rememberUserFocusTarget, { passive: true, capture: true });
+    // Focus during the trusted touch/pointer gesture so mobile browsers are
+    // still allowed to reopen the virtual keyboard after a lost selection.
+    document.addEventListener('touchstart', restoreDirectUserFocus, { passive: true, capture: true });
+    document.addEventListener('pointerdown', restoreDirectUserFocus, { passive: true, capture: true });
     document.addEventListener('mousedown', rememberUserFocusTarget, { capture: true });
     document.addEventListener('click', restoreDirectUserFocus, { capture: true });
 
@@ -246,8 +248,8 @@ function initMobileFocusInterceptor() {
     function destroy() {
         observer.disconnect();
         restorePatchedElement();
-        document.removeEventListener('touchstart', rememberUserFocusTarget, { capture: true });
-        document.removeEventListener('pointerdown', rememberUserFocusTarget, { capture: true });
+        document.removeEventListener('touchstart', restoreDirectUserFocus, { capture: true });
+        document.removeEventListener('pointerdown', restoreDirectUserFocus, { capture: true });
         document.removeEventListener('mousedown', rememberUserFocusTarget, { capture: true });
         document.removeEventListener('click', restoreDirectUserFocus, { capture: true });
         window.removeEventListener('beforeunload', destroy);
@@ -495,7 +497,10 @@ function initPastePerformanceFix() {
         }
 
         var currentLength = target.value.length;
-        var delta = Math.abs(currentLength - lastValueLength);
+        // The fallback exists only for large insertions that bypass beforeinput.
+        // Using an absolute delta also captured select-all deletion, swallowed the
+        // trusted input event, and replayed it later as a synthetic event.
+        var delta = currentLength - lastValueLength;
 
         if (delta < 20) {
             lastValueLength = currentLength;
