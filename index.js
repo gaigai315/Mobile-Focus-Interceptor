@@ -6,7 +6,8 @@
    针对 SillyTavern 移动端痛点优化的前端插件，双端共有的问题也会顺手一并修复。
 
    模块 A：聚焦拦截（仅移动端）
-           拦截代码自动聚焦，只在用户主动点击输入框时允许聚焦弹出键盘。
+           拦截主会话输入框的代码自动聚焦，只在用户主动点击时允许弹出键盘；
+           拦截仅绑定到 #send_textarea 元素实例，不修改全局 focus 方法。
    模块 B：键盘粘贴卡顿修复（仅移动端）
            beforeinput 拦截 + visibility:hidden 抑制重绘，将分段粘贴合并为一次性渲染；
            合并窗口按文本量自适应，超大文本分段/重复粘贴不逐段整段重写。
@@ -21,6 +22,9 @@
            检测到 ST 输入框未聚焦，或刚切出 ST 后输入框仍保留焦点时的
            视口骤减后，用像素高度冻结主布局，避免 ST 跟随外部键盘缩放，
            同时保留 ST 自身键盘的原生行为。
+   模块 F：AutoComplete 生命周期修复（桌面/移动通用）
+           动态编辑器移除输入框后，阻止残留的 AutoComplete 实例继续定位；
+           清理失效浮层，避免移动键盘 resize 触发空节点报错并打断输入焦点。
 
    控制台输出：默认只打印 1 条整体加载成功提示，以及真正出现问题时的 warn / error；
            把下方 MFI_DEBUG 改为 true，可额外看到分模块就绪信息与详细调试日志。
@@ -78,52 +82,179 @@ function initMobileFocusInterceptor() {
         return;
     }
 
-    var lastTouchTime = 0;
-    var wasTouchOnInput = false;
+    var inputElements = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
+    var patchedElement = null;
+    var patchedElementRecord = null;
+    var userFocusWindowMs = 1500;
+    var lastUserFocusTarget = null;
+    var lastUserFocusTime = 0;
 
-    function updateTouchTime(e) {
-        lastTouchTime = Date.now();
-        var el = e.target;
-        wasTouchOnInput = (
-            el.tagName === 'INPUT' ||
-            el.tagName === 'TEXTAREA' ||
-            el.tagName === 'SELECT' ||
+    function isEditableElement(el) {
+        return el instanceof HTMLElement && (
+            inputElements.has(el.tagName) ||
             el.isContentEditable
         );
     }
 
-    document.addEventListener('touchstart', updateTouchTime, { passive: true, capture: true });
-    document.addEventListener('pointerdown', updateTouchTime, { passive: true, capture: true });
-    document.addEventListener('mousedown', updateTouchTime, { capture: true });
-
-    var originalFocus = HTMLElement.prototype.focus;
-    var inputElements = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
-
-    HTMLElement.prototype.focus = function (options) {
-        var now = Date.now();
-        var isUserInitiated = (now - lastTouchTime) < 500 && wasTouchOnInput;
-
-        if (isUserInitiated || !inputElements.has(this.tagName)) {
-            return originalFocus.call(this, options);
+    function getUserFocusTarget(e) {
+        var path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+        if (path.length === 0 && e.target) {
+            path = [e.target];
         }
 
-        if (!this.isConnected) {
-            return originalFocus.call(this, options);
-        }
-        var computedStyle = window.getComputedStyle(this);
-        if (computedStyle.display === 'none' || computedStyle.visibility === 'hidden') {
-            return originalFocus.call(this, options);
+        for (var i = 0; i < path.length; i++) {
+            var el = path[i];
+            if (!(el instanceof HTMLElement)) continue;
+            if (isEditableElement(el)) return el;
+            if (el.tagName === 'LABEL' && isEditableElement(el.control)) {
+                return el.control;
+            }
         }
 
+        return null;
+    }
+
+    function rememberUserFocusTarget(e) {
+        if (e.isTrusted === false) return null;
+        lastUserFocusTarget = getUserFocusTarget(e);
+        lastUserFocusTime = lastUserFocusTarget ? Date.now() : 0;
+        return lastUserFocusTarget;
+    }
+
+    function shouldBlockAutomaticFocus(el) {
+        return el.id === 'send_textarea';
+    }
+
+    function wasDirectlyActivatedByUser(el) {
+        return lastUserFocusTarget === el && Date.now() - lastUserFocusTime <= userFocusWindowMs;
+    }
+
+    function callOriginalFocus(el, options) {
+        var focusMethod = patchedElementRecord && el === patchedElement && el.focus === patchedElementRecord.patchedFocus
+            ? patchedElementRecord.originalFocus
+            : el.focus;
+
+        if (typeof focusMethod === 'function') {
+            return focusMethod.call(el, options);
+        }
         return undefined;
-    };
+    }
+
+    function restoreDirectUserFocus(e) {
+        var target = rememberUserFocusTarget(e);
+        if (!target || !shouldBlockAutomaticFocus(target)) {
+            return;
+        }
+
+        // Run the original method while the trusted click gesture is active.
+        callOriginalFocus(target);
+    }
+
+    function patchElement(el) {
+        if (!(el instanceof HTMLElement) || !shouldBlockAutomaticFocus(el) || el === patchedElement) {
+            return;
+        }
+
+        var ownDescriptor = Object.getOwnPropertyDescriptor(el, 'focus');
+        var originalFocus = el.focus;
+        if (typeof originalFocus !== 'function') {
+            return;
+        }
+
+        var patchedFocus = function (options) {
+            if (this !== el || !shouldBlockAutomaticFocus(el) || wasDirectlyActivatedByUser(el)) {
+                return originalFocus.call(this, options);
+            }
+
+            if (!el.isConnected) {
+                return originalFocus.call(el, options);
+            }
+            var computedStyle = window.getComputedStyle(el);
+            if (computedStyle.display === 'none' || computedStyle.visibility === 'hidden') {
+                return originalFocus.call(el, options);
+            }
+
+            return undefined;
+        };
+
+        try {
+            Object.defineProperty(el, 'focus', {
+                configurable: true,
+                enumerable: ownDescriptor ? ownDescriptor.enumerable : false,
+                writable: true,
+                value: patchedFocus,
+            });
+            patchedElement = el;
+            patchedElementRecord = {
+                patchedFocus: patchedFocus,
+                originalFocus: originalFocus,
+                ownDescriptor: ownDescriptor,
+            };
+        } catch (err) {
+            console.warn('[MobileFocus] 无法拦截主输入框的 focus：', err);
+        }
+    }
+
+    function restorePatchedElement() {
+        if (!patchedElement || !patchedElementRecord) {
+            return;
+        }
+
+        var el = patchedElement;
+        var record = patchedElementRecord;
+        try {
+            if (el.focus === record.patchedFocus) {
+                if (record.ownDescriptor) {
+                    Object.defineProperty(el, 'focus', record.ownDescriptor);
+                } else {
+                    delete el.focus;
+                }
+            }
+        } catch (err) {
+            console.warn('[MobileFocus] 无法恢复主输入框的 focus：', err);
+        }
+
+        patchedElement = null;
+        patchedElementRecord = null;
+    }
+
+    function syncTargetElement() {
+        var currentTarget = document.getElementById('send_textarea');
+        if (patchedElement && patchedElement !== currentTarget) {
+            restorePatchedElement();
+        }
+        if (currentTarget && currentTarget !== patchedElement) {
+            patchElement(currentTarget);
+        }
+    }
+
+    document.addEventListener('touchstart', rememberUserFocusTarget, { passive: true, capture: true });
+    document.addEventListener('pointerdown', rememberUserFocusTarget, { passive: true, capture: true });
+    document.addEventListener('mousedown', rememberUserFocusTarget, { capture: true });
+    document.addEventListener('click', restoreDirectUserFocus, { capture: true });
+
+    syncTargetElement();
+
+    var observer = new MutationObserver(syncTargetElement);
+    observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['id'],
+        childList: true,
+        subtree: true,
+    });
 
     function destroy() {
-        HTMLElement.prototype.focus = originalFocus;
-        document.removeEventListener('touchstart', updateTouchTime, { capture: true });
-        document.removeEventListener('pointerdown', updateTouchTime, { capture: true });
-        document.removeEventListener('mousedown', updateTouchTime, { capture: true });
+        observer.disconnect();
+        restorePatchedElement();
+        document.removeEventListener('touchstart', rememberUserFocusTarget, { capture: true });
+        document.removeEventListener('pointerdown', rememberUserFocusTarget, { capture: true });
+        document.removeEventListener('mousedown', rememberUserFocusTarget, { capture: true });
+        document.removeEventListener('click', restoreDirectUserFocus, { capture: true });
+        window.removeEventListener('beforeunload', destroy);
         window.__mobileFocusInterceptorInstalled__ = false;
+        if (window.__mobileFocusInterceptorDestroy__ === destroy) {
+            delete window.__mobileFocusInterceptorDestroy__;
+        }
     }
 
     window.addEventListener('beforeunload', destroy);
@@ -1623,6 +1754,180 @@ function initExternalKeyboardViewportFix() {
 }
 
 // ============================================================
+// 模块 F: AutoComplete 生命周期修复（桌面/移动通用）
+// ============================================================
+// ST 的 AutoComplete 会给 window.resize 注册匿名监听器，但动态编辑器销毁时
+// 没有对应的卸载入口。移动键盘改变视口后，旧实例仍会尝试读取已脱离 DOM
+// 的 textarea 所属层，最终对 null 调用 getBoundingClientRect()。
+
+function initAutoCompleteLifecycleFix() {
+    if (window.__autoCompleteLifecycleFixInstalled__) {
+        return;
+    }
+    window.__autoCompleteLifecycleFixInstalled__ = true;
+
+    var destroyed = false;
+    var patchRecord = null;
+    var detachedLayer = document.createElement('div');
+    detachedLayer.setAttribute('aria-hidden', 'true');
+
+    function isDetached(instance) {
+        return !instance || !instance.textarea || !instance.textarea.isConnected;
+    }
+
+    function cleanupDetachedInstance(instance) {
+        if (!instance) {
+            return;
+        }
+
+        if (instance.domWrap && typeof instance.domWrap.remove === 'function') {
+            instance.domWrap.remove();
+        }
+        if (instance.detailsWrap && typeof instance.detailsWrap.remove === 'function') {
+            instance.detailsWrap.remove();
+        }
+        if (instance.clone && typeof instance.clone.remove === 'function') {
+            instance.clone.remove();
+        }
+        instance.isActive = false;
+        instance.isShowingDetails = false;
+        instance.wasForced = false;
+    }
+
+    function installGuard(AutoComplete) {
+        var proto = AutoComplete && AutoComplete.prototype;
+        if (!proto || typeof proto.getLayer !== 'function') {
+            throw new Error('AutoComplete prototype is unavailable');
+        }
+
+        var marker = '__mfiAutoCompleteLifecyclePatch__';
+        if (proto[marker]) {
+            mfiLog('[MobileFocus] 模块 F 已由其他实例安装');
+            return;
+        }
+
+        patchRecord = {
+            proto: proto,
+            marker: marker,
+            methods: [],
+        };
+
+        function replaceMethod(name, createPatched) {
+            var original = proto[name];
+            if (typeof original !== 'function') {
+                return;
+            }
+            var patched = createPatched(original);
+            proto[name] = patched;
+            patchRecord.methods.push({ name: name, original: original, patched: patched });
+        }
+
+        replaceMethod('getLayer', function (original) {
+            return function () {
+                var layer = null;
+                try {
+                    layer = original.apply(this, arguments);
+                } catch (err) {
+                    if (!isDetached(this)) {
+                        throw err;
+                    }
+                }
+
+                if (layer) {
+                    return layer;
+                }
+
+                if (this.textarea && this.textarea.isConnected) {
+                    return this.textarea.ownerDocument.body || document.body;
+                }
+
+                cleanupDetachedInstance(this);
+                return detachedLayer;
+            };
+        });
+
+        [
+            'updatePosition',
+            'updateDetailsPosition',
+            'updateFloatingPosition',
+            'updateFloatingDetailsPosition',
+            'render',
+            'renderDetails',
+        ].forEach(function (name) {
+            replaceMethod(name, function (original) {
+                return function () {
+                    if (isDetached(this)) {
+                        cleanupDetachedInstance(this);
+                        return undefined;
+                    }
+                    return original.apply(this, arguments);
+                };
+            });
+        });
+
+        replaceMethod('getCursorPosition', function (original) {
+            return function () {
+                if (isDetached(this)) {
+                    cleanupDetachedInstance(this);
+                    return {
+                        left: Number.NEGATIVE_INFINITY,
+                        top: Number.NEGATIVE_INFINITY,
+                        bottom: Number.NEGATIVE_INFINITY,
+                    };
+                }
+                return original.apply(this, arguments);
+            };
+        });
+
+        Object.defineProperty(proto, marker, {
+            configurable: true,
+            value: patchRecord,
+        });
+        mfiLog('[MobileFocus] 模块 F AutoComplete 生命周期修复就绪');
+    }
+
+    function destroy() {
+        destroyed = true;
+
+        if (patchRecord) {
+            var proto = patchRecord.proto;
+            for (var i = patchRecord.methods.length - 1; i >= 0; i--) {
+                var item = patchRecord.methods[i];
+                if (proto[item.name] === item.patched) {
+                    proto[item.name] = item.original;
+                }
+            }
+            if (proto[patchRecord.marker] === patchRecord) {
+                delete proto[patchRecord.marker];
+            }
+            patchRecord = null;
+        }
+
+        window.removeEventListener('beforeunload', destroy);
+        window.__autoCompleteLifecycleFixInstalled__ = false;
+        if (window.__autoCompleteLifecycleFixDestroy__ === destroy) {
+            delete window.__autoCompleteLifecycleFixDestroy__;
+        }
+    }
+
+    window.addEventListener('beforeunload', destroy);
+    window.__autoCompleteLifecycleFixDestroy__ = destroy;
+
+    import('../../../autocomplete/AutoComplete.js')
+        .then(function (module) {
+            if (!destroyed) {
+                installGuard(module.AutoComplete);
+            }
+        })
+        .catch(function (err) {
+            if (!destroyed) {
+                window.__autoCompleteLifecycleFixInstalled__ = false;
+                console.warn('[MobileFocus] 模块 F AutoComplete 生命周期修复初始化失败：', err);
+            }
+        });
+}
+
+// ============================================================
 // 扩展入口
 // ============================================================
 
@@ -1633,6 +1938,7 @@ function startAllModules() {
     initTokenCounterRenderFix();
     initNativeHasInvalidationFix();
     initExternalKeyboardViewportFix();
+    initAutoCompleteLifecycleFix();
     mfiLogLoaded();
 }
 
