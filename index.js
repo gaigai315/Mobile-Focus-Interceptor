@@ -88,41 +88,6 @@ function initMobileFocusInterceptor() {
     var userFocusWindowMs = 1500;
     var lastUserFocusTarget = null;
     var lastUserFocusTime = 0;
-    var caretRecoveryClass = 'mfi-empty-caret-recovery';
-    var caretIndicator = null;
-    var caretStyle = document.createElement('style');
-    caretStyle.id = 'mfi-empty-caret-recovery-style';
-    caretStyle.textContent = [
-        '#send_textarea.' + caretRecoveryClass + ':focus {',
-        '    position: relative !important;',
-        '    z-index: 10 !important;',
-        '    caret-color: currentColor !important;',
-        '    -webkit-text-fill-color: currentColor !important;',
-        '    text-align: start !important;',
-        '}',
-        '#nonQRFormItems:has(#send_textarea.' + caretRecoveryClass + ':focus)::before {',
-        '    visibility: hidden !important;',
-        '}',
-        '#mfi-empty-caret-indicator {',
-        '    position: absolute !important;',
-        '    display: none;',
-        '    width: 2px;',
-        '    min-width: 2px;',
-        '    border-radius: 1px;',
-        '    pointer-events: none !important;',
-        '    z-index: 20 !important;',
-        '}',
-        '#mfi-empty-caret-indicator.mfi-visible {',
-        '    display: block;',
-        '    animation: mfi-empty-caret-blink 1s steps(1, end) infinite;',
-        '}',
-        '@keyframes mfi-empty-caret-blink {',
-        '    0%, 45% { opacity: 1; }',
-        '    50%, 95% { opacity: 0; }',
-        '    100% { opacity: 1; }',
-        '}',
-    ].join('\n');
-    (document.head || document.documentElement).appendChild(caretStyle);
 
     function isEditableElement(el) {
         return el instanceof HTMLElement && (
@@ -162,115 +127,6 @@ function initMobileFocusInterceptor() {
 
     function wasDirectlyActivatedByUser(el) {
         return lastUserFocusTarget === el && Date.now() - lastUserFocusTime <= userFocusWindowMs;
-    }
-
-    function callOriginalFocus(el, options) {
-        var focusMethod = patchedElementRecord && el === patchedElement && el.focus === patchedElementRecord.patchedFocus
-            ? patchedElementRecord.originalFocus
-            : el.focus;
-
-        if (typeof focusMethod === 'function') {
-            return focusMethod.call(el, options);
-        }
-        return undefined;
-    }
-
-    function hideCaretIndicator() {
-        if (caretIndicator) {
-            caretIndicator.classList.remove('mfi-visible');
-        }
-    }
-
-    function showCaretIndicator(el) {
-        var holder = document.getElementById('nonQRFormItems');
-        if (!holder || !holder.contains(el) || document.activeElement !== el || el.value !== '') {
-            hideCaretIndicator();
-            return;
-        }
-
-        if (!caretIndicator) {
-            caretIndicator = document.createElement('span');
-            caretIndicator.id = 'mfi-empty-caret-indicator';
-            caretIndicator.setAttribute('aria-hidden', 'true');
-        }
-        if (caretIndicator.parentNode !== holder) {
-            holder.appendChild(caretIndicator);
-        }
-
-        var inputRect = el.getBoundingClientRect();
-        var holderRect = holder.getBoundingClientRect();
-        var style = window.getComputedStyle(el);
-        var paddingLeft = parseFloat(style.paddingLeft) || 0;
-        var paddingTop = parseFloat(style.paddingTop) || 0;
-        var paddingBottom = parseFloat(style.paddingBottom) || 0;
-        var fontSize = parseFloat(style.fontSize) || 16;
-        var lineHeight = parseFloat(style.lineHeight) || fontSize * 1.2;
-        var availableHeight = Math.max(1, inputRect.height - paddingTop - paddingBottom);
-        var caretHeight = Math.max(12, Math.min(lineHeight, availableHeight));
-
-        caretIndicator.style.left = (inputRect.left - holderRect.left + paddingLeft) + 'px';
-        caretIndicator.style.top = (inputRect.top - holderRect.top + (inputRect.height - caretHeight) / 2) + 'px';
-        caretIndicator.style.height = caretHeight + 'px';
-        caretIndicator.style.backgroundColor = style.color;
-        caretIndicator.classList.add('mfi-visible');
-    }
-
-    function restoreEmptyCaret(el) {
-        if (!el || el.value !== '') {
-            if (el) {
-                el.classList.remove(caretRecoveryClass);
-            }
-            hideCaretIndicator();
-            return;
-        }
-
-        el.classList.add(caretRecoveryClass);
-        if (typeof el.setSelectionRange === 'function') {
-            try {
-                el.setSelectionRange(0, 0);
-            } catch (err) {
-                mfiDebug('[MobileFocus] Failed to restore the empty composer selection:', err);
-            }
-        }
-        showCaretIndicator(el);
-    }
-
-    function onComposerInput(e) {
-        var target = e.currentTarget;
-        if (target.value === '' && document.activeElement === target) {
-            restoreEmptyCaret(target);
-        } else {
-            target.classList.remove(caretRecoveryClass);
-            hideCaretIndicator();
-        }
-    }
-
-    function onComposerFocus(e) {
-        restoreEmptyCaret(e.currentTarget);
-    }
-
-    function onComposerBlur() {
-        hideCaretIndicator();
-    }
-
-    function onViewportChange() {
-        if (patchedElement && patchedElement.value === '' && document.activeElement === patchedElement) {
-            showCaretIndicator(patchedElement);
-        }
-    }
-
-    function restoreDirectUserFocus(e) {
-        var target = rememberUserFocusTarget(e);
-        if (!target || !shouldBlockAutomaticFocus(target)) {
-            return;
-        }
-
-        // Avoid repeatedly focusing an element that already owns the native
-        // editing session. Repeated focus calls can suppress Android caret paint.
-        if (document.activeElement !== target) {
-            callOriginalFocus(target, { preventScroll: true });
-        }
-        restoreEmptyCaret(target);
     }
 
     function eventTargetsId(e, id) {
@@ -346,13 +202,7 @@ function initMobileFocusInterceptor() {
                 patchedFocus: patchedFocus,
                 originalFocus: originalFocus,
                 ownDescriptor: ownDescriptor,
-                inputHandler: onComposerInput,
-                focusHandler: onComposerFocus,
-                blurHandler: onComposerBlur,
             };
-            el.addEventListener('input', onComposerInput);
-            el.addEventListener('focus', onComposerFocus);
-            el.addEventListener('blur', onComposerBlur);
         } catch (err) {
             console.warn('[MobileFocus] 无法拦截主输入框的 focus：', err);
         }
@@ -365,11 +215,6 @@ function initMobileFocusInterceptor() {
 
         var el = patchedElement;
         var record = patchedElementRecord;
-        el.removeEventListener('input', record.inputHandler);
-        el.removeEventListener('focus', record.focusHandler);
-        el.removeEventListener('blur', record.blurHandler);
-        el.classList.remove(caretRecoveryClass);
-        hideCaretIndicator();
         try {
             if (el.focus === record.patchedFocus) {
                 if (record.ownDescriptor) {
@@ -396,17 +241,11 @@ function initMobileFocusInterceptor() {
         }
     }
 
-    // Focus during the trusted touch/pointer gesture so mobile browsers are
-    // still allowed to reopen the virtual keyboard after a lost selection.
-    document.addEventListener('touchstart', restoreDirectUserFocus, { passive: true, capture: true });
-    document.addEventListener('pointerdown', restoreDirectUserFocus, { passive: true, capture: true });
+    document.addEventListener('touchstart', rememberUserFocusTarget, { passive: true, capture: true });
+    document.addEventListener('pointerdown', rememberUserFocusTarget, { passive: true, capture: true });
     document.addEventListener('pointerdown', preserveComposerFocusForSend, { passive: false, capture: true });
     document.addEventListener('mousedown', rememberUserFocusTarget, { capture: true });
-    document.addEventListener('click', restoreDirectUserFocus, { capture: true });
-    window.addEventListener('resize', onViewportChange, { passive: true });
-    if (window.visualViewport) {
-        window.visualViewport.addEventListener('resize', onViewportChange, { passive: true });
-    }
+    document.addEventListener('click', rememberUserFocusTarget, { capture: true });
 
     syncTargetElement();
 
@@ -421,22 +260,11 @@ function initMobileFocusInterceptor() {
     function destroy() {
         observer.disconnect();
         restorePatchedElement();
-        document.removeEventListener('touchstart', restoreDirectUserFocus, { capture: true });
-        document.removeEventListener('pointerdown', restoreDirectUserFocus, { capture: true });
+        document.removeEventListener('touchstart', rememberUserFocusTarget, { capture: true });
+        document.removeEventListener('pointerdown', rememberUserFocusTarget, { capture: true });
         document.removeEventListener('pointerdown', preserveComposerFocusForSend, { capture: true });
         document.removeEventListener('mousedown', rememberUserFocusTarget, { capture: true });
-        document.removeEventListener('click', restoreDirectUserFocus, { capture: true });
-        window.removeEventListener('resize', onViewportChange);
-        if (window.visualViewport) {
-            window.visualViewport.removeEventListener('resize', onViewportChange);
-        }
-        if (caretIndicator && caretIndicator.parentNode) {
-            caretIndicator.parentNode.removeChild(caretIndicator);
-        }
-        caretIndicator = null;
-        if (caretStyle.parentNode) {
-            caretStyle.parentNode.removeChild(caretStyle);
-        }
+        document.removeEventListener('click', rememberUserFocusTarget, { capture: true });
         window.removeEventListener('beforeunload', destroy);
         window.__mobileFocusInterceptorInstalled__ = false;
         if (window.__mobileFocusInterceptorDestroy__ === destroy) {
