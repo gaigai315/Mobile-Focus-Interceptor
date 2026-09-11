@@ -88,6 +88,17 @@ function initMobileFocusInterceptor() {
     var userFocusWindowMs = 1500;
     var lastUserFocusTarget = null;
     var lastUserFocusTime = 0;
+    var caretRecoveryClass = 'mfi-empty-caret-recovery';
+    var caretStyle = document.createElement('style');
+    caretStyle.id = 'mfi-empty-caret-recovery-style';
+    caretStyle.textContent = [
+        '#send_textarea.' + caretRecoveryClass + ':focus {',
+        '    position: relative !important;',
+        '    z-index: 10 !important;',
+        '    caret-color: currentColor !important;',
+        '}',
+    ].join('\n');
+    (document.head || document.documentElement).appendChild(caretStyle);
 
     function isEditableElement(el) {
         return el instanceof HTMLElement && (
@@ -140,14 +151,77 @@ function initMobileFocusInterceptor() {
         return undefined;
     }
 
+    function restoreEmptyCaret(el) {
+        if (!el || el.value !== '') {
+            if (el) {
+                el.classList.remove(caretRecoveryClass);
+            }
+            return;
+        }
+
+        el.classList.add(caretRecoveryClass);
+        if (typeof el.setSelectionRange === 'function') {
+            try {
+                el.setSelectionRange(0, 0);
+            } catch (err) {
+                mfiDebug('[MobileFocus] Failed to restore the empty composer selection:', err);
+            }
+        }
+    }
+
+    function onComposerInput(e) {
+        var target = e.currentTarget;
+        if (target.value === '' && document.activeElement === target) {
+            restoreEmptyCaret(target);
+        } else {
+            target.classList.remove(caretRecoveryClass);
+        }
+    }
+
     function restoreDirectUserFocus(e) {
         var target = rememberUserFocusTarget(e);
         if (!target || !shouldBlockAutomaticFocus(target)) {
             return;
         }
 
-        // Run the original method while the trusted click gesture is active.
-        callOriginalFocus(target);
+        // Run the original method while the trusted gesture is active, then
+        // explicitly recreate the collapsed selection lost by select-all delete.
+        callOriginalFocus(target, { preventScroll: true });
+        restoreEmptyCaret(target);
+    }
+
+    function eventTargetsId(e, id) {
+        var path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+        if (path.length === 0 && e.target) {
+            path = [e.target];
+        }
+
+        for (var i = 0; i < path.length; i++) {
+            var el = path[i];
+            if (el instanceof HTMLElement && el.id === id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function preserveComposerFocusForSend(e) {
+        if (e.isTrusted === false || (typeof e.button === 'number' && e.button !== 0)) {
+            return;
+        }
+        if (!eventTargetsId(e, 'send_but')) {
+            return;
+        }
+
+        var textarea = document.getElementById('send_textarea');
+        if (!textarea || document.activeElement !== textarea) {
+            return;
+        }
+
+        // Prevent the pointer-down default from blurring the composer and
+        // moving the send button while the keyboard closes. Do not stop the
+        // event: SillyTavern's native click handler still performs the send.
+        e.preventDefault();
     }
 
     function patchElement(el) {
@@ -189,7 +263,9 @@ function initMobileFocusInterceptor() {
                 patchedFocus: patchedFocus,
                 originalFocus: originalFocus,
                 ownDescriptor: ownDescriptor,
+                inputHandler: onComposerInput,
             };
+            el.addEventListener('input', onComposerInput);
         } catch (err) {
             console.warn('[MobileFocus] 无法拦截主输入框的 focus：', err);
         }
@@ -202,6 +278,8 @@ function initMobileFocusInterceptor() {
 
         var el = patchedElement;
         var record = patchedElementRecord;
+        el.removeEventListener('input', record.inputHandler);
+        el.classList.remove(caretRecoveryClass);
         try {
             if (el.focus === record.patchedFocus) {
                 if (record.ownDescriptor) {
@@ -232,6 +310,7 @@ function initMobileFocusInterceptor() {
     // still allowed to reopen the virtual keyboard after a lost selection.
     document.addEventListener('touchstart', restoreDirectUserFocus, { passive: true, capture: true });
     document.addEventListener('pointerdown', restoreDirectUserFocus, { passive: true, capture: true });
+    document.addEventListener('pointerdown', preserveComposerFocusForSend, { passive: false, capture: true });
     document.addEventListener('mousedown', rememberUserFocusTarget, { capture: true });
     document.addEventListener('click', restoreDirectUserFocus, { capture: true });
 
@@ -250,8 +329,12 @@ function initMobileFocusInterceptor() {
         restorePatchedElement();
         document.removeEventListener('touchstart', restoreDirectUserFocus, { capture: true });
         document.removeEventListener('pointerdown', restoreDirectUserFocus, { capture: true });
+        document.removeEventListener('pointerdown', preserveComposerFocusForSend, { capture: true });
         document.removeEventListener('mousedown', rememberUserFocusTarget, { capture: true });
         document.removeEventListener('click', restoreDirectUserFocus, { capture: true });
+        if (caretStyle.parentNode) {
+            caretStyle.parentNode.removeChild(caretStyle);
+        }
         window.removeEventListener('beforeunload', destroy);
         window.__mobileFocusInterceptorInstalled__ = false;
         if (window.__mobileFocusInterceptorDestroy__ === destroy) {
